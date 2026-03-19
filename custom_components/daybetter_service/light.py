@@ -6,7 +6,6 @@ from typing import Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
     ATTR_HS_COLOR,
     ColorMode,
     LightEntity,
@@ -55,19 +54,20 @@ class DayBetterLight(LightEntity):
         
         device_features = device.get("deviceFeatures", [])
         
-        supported_modes = set()
-        
-        if 2 in device_features:
-            supported_modes.add(ColorMode.BRIGHTNESS)
-            
+        # Home Assistant 2026.3.x 会对 supported_color_modes 做组合校验。
+        # 为了确保实体能注册成功，这里采用“只声明一个最具体模式”的策略：
+        # - 只要支持 HS，就只声明 HS（不再额外声明 BRIGHTNESS）
+        # - 否则只声明 COLOR_TEMP
+        # - 否则只声明 BRIGHTNESS
+        supported_modes: set[ColorMode] = set()
         if 3 in device_features:
-            supported_modes.add(ColorMode.HS)
-            
-        if 4 in device_features:
-            supported_modes.add(ColorMode.COLOR_TEMP)
-            
-        if not supported_modes:
-            supported_modes.add(ColorMode.BRIGHTNESS)
+            supported_modes = {ColorMode.HS}
+        elif 4 in device_features:
+            supported_modes = {ColorMode.COLOR_TEMP}
+        elif 2 in device_features:
+            supported_modes = {ColorMode.BRIGHTNESS}
+        else:
+            supported_modes = {ColorMode.BRIGHTNESS}
             
         self._attr_supported_color_modes = supported_modes
         
@@ -80,7 +80,7 @@ class DayBetterLight(LightEntity):
         else:
             self._attr_color_mode = ColorMode.UNKNOWN
             
-        if 4 in device_features:
+        if ColorMode.COLOR_TEMP in supported_modes:
             self._min_mireds = 150
             self._max_mireds = 500
             
@@ -94,7 +94,15 @@ class DayBetterLight(LightEntity):
     @property
     def brightness(self) -> int | None:
         """Return the brightness of the light."""
-        if self._attr_supported_color_modes and ColorMode.BRIGHTNESS in self._attr_supported_color_modes:
+        # 当 supported_color_modes 包含 HS/COLOR_TEMP 时，亮度仍然应该可用。
+        if (
+            self._attr_supported_color_modes
+            and (
+                ColorMode.BRIGHTNESS in self._attr_supported_color_modes
+                or ColorMode.HS in self._attr_supported_color_modes
+                or ColorMode.COLOR_TEMP in self._attr_supported_color_modes
+            )
+        ):
             return self._brightness
         return None
 
@@ -130,7 +138,15 @@ class DayBetterLight(LightEntity):
         """Turn the light on."""
         # Get the brightness value set by the user
         brightness = kwargs.get(ATTR_BRIGHTNESS)
-        if brightness is not None and self._attr_supported_color_modes and ColorMode.BRIGHTNESS in self._attr_supported_color_modes:
+        has_brightness = (
+            self._attr_supported_color_modes
+            and (
+                ColorMode.BRIGHTNESS in self._attr_supported_color_modes
+                or ColorMode.HS in self._attr_supported_color_modes
+                or ColorMode.COLOR_TEMP in self._attr_supported_color_modes
+            )
+        )
+        if brightness is not None and has_brightness:
             self._brightness = brightness
 
         # Processing color
@@ -139,7 +155,9 @@ class DayBetterLight(LightEntity):
             self._hs_color = hs_color
 
         # Handle color temperature
-        color_temp = kwargs.get(ATTR_COLOR_TEMP)
+        # Home Assistant 2026.3.x may not expose ATTR_COLOR_TEMP constant anymore,
+        # but the service/kwargs key is still "color_temp".
+        color_temp = kwargs.get("color_temp")
         if color_temp is not None and self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
             self._color_temp = color_temp
 
@@ -147,7 +165,7 @@ class DayBetterLight(LightEntity):
         result = await self._api.control_device(
             self._device["deviceName"], 
             True, 
-            brightness if self._attr_supported_color_modes and ColorMode.BRIGHTNESS in self._attr_supported_color_modes else None,
+            brightness if has_brightness else None,
             hs_color if self._attr_supported_color_modes and ColorMode.HS in self._attr_supported_color_modes else None,
             color_temp if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes else None
         )
