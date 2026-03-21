@@ -134,17 +134,17 @@ class DayBetterSensor(SensorEntity):
         if kind == "temperature":
             self._attr_device_class = SensorDeviceClass.TEMPERATURE
             self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-            self._attr_name = f"{self._device_name} 温度"
+            self._attr_name = f"{self._device_name} Temperature"
             self._attr_suggested_display_precision = 1
         elif kind == "humidity":
             self._attr_device_class = SensorDeviceClass.HUMIDITY
             self._attr_native_unit_of_measurement = PERCENTAGE
-            self._attr_name = f"{self._device_name} 湿度"
+            self._attr_name = f"{self._device_name} Humidity"
             self._attr_suggested_display_precision = 0
         else:
             self._attr_device_class = SensorDeviceClass.BATTERY
             self._attr_native_unit_of_measurement = PERCENTAGE
-            self._attr_name = f"{self._device_name} 电量"
+            self._attr_name = f"{self._device_name} Battery"
             self._attr_suggested_display_precision = 0
 
         self._attr_unique_id = f"{self._device_id}_{self._kind}"
