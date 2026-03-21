@@ -46,7 +46,7 @@ class DayBetterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         new_data = user_input.copy()
                         new_data[CONF_TOKEN] = token
 
-                        _LOGGER.info("DayBetter auth OK")
+                        _LOGGER.debug("DayBetter auth OK")
                         # Save information such as tokens and refresh_token
                         return self.async_create_entry(
                             title="DayBetter",

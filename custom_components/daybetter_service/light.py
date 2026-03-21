@@ -16,7 +16,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("custom_components.daybetter_services")
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -30,11 +30,16 @@ async def async_setup_entry(
     pids_data = await api.fetch_pids()
     light_pids_str = pids_data.get("light", "")
     light_pids = set(light_pids_str.split(",")) if light_pids_str else set()
+
+    # If a device is categorized as sensor, don't expose it as a light.
+    # This avoids 温湿度计 误被创建成灯类实体的情况。
+    sensor_pids_str = pids_data.get("sensor", "")
+    sensor_pids = set(sensor_pids_str.split(",")) if sensor_pids_str else set()
     
     lights = [
         DayBetterLight(api, dev) 
         for dev in devices 
-        if dev.get("deviceMoldPid") in light_pids
+        if dev.get("deviceMoldPid") in light_pids and dev.get("deviceMoldPid") not in sensor_pids
     ]    
     async_add_entities(lights)
 

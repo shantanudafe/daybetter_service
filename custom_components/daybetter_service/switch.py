@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("custom_components.daybetter_services")
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -26,10 +26,14 @@ async def async_setup_entry(
     switch_pids_str = pids_data.get("switch", "")
     switch_pids = set(switch_pids_str.split(",")) if switch_pids_str else set()
 
+    # If a device is categorized as sensor, don't expose it as a switch.
+    sensor_pids_str = pids_data.get("sensor", "")
+    sensor_pids = set(sensor_pids_str.split(",")) if sensor_pids_str else set()
+
     switches = [
         DayBetterSwitch(api, dev) 
         for dev in devices 
-        if dev.get("deviceMoldPid") in switch_pids
+        if dev.get("deviceMoldPid") in switch_pids and dev.get("deviceMoldPid") not in sensor_pids
     ]
     async_add_entities(switches)
 

@@ -1,4 +1,3 @@
 logger:
   default: info
-  logs:
-    custom_components.daybetter_services: debug
+  # 排查问题时可临时打开：custom_components.daybetter_services: debug

@@ -41,6 +41,12 @@ Before installing this integration, you need to:
 4. Enter your Daybetter credentials if required
 5. Complete the setup process
 
+## History & statistics (温湿度、电量曲线)
+
+Temperature, humidity, and battery sensors use `state_class: measurement` and **`force_update`** so Home Assistant’s **Recorder** can store a point on each poll (~5 minutes). History and long‑term statistics appear from the moment the entity first reports a numeric state—there is no retroactive data from the DayBetter cloud inside HA.
+
+Ensure **Recorder** is enabled and you have not excluded `sensor.daybetter_services*` (or the entity) in `configuration.yaml`. If you previously had Recorder/database issues, fix SQLite/recorder first.
+
 ## Support
 
 If you encounter any issues or have questions:
