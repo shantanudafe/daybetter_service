@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.light import (
@@ -13,10 +14,88 @@ from homeassistant.components.light import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger("custom_components.daybetter_services")
+SCAN_INTERVAL = timedelta(seconds=300)
+
+
+def _safe_float(value: Any) -> float | None:
+    """Cast a raw value to float if possible."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "":
+                return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_first_existing(dev: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
+    """Read a value from top-level or common nested status containers."""
+    for container_key in ("deviceData", "data", "status", "extend", "extra"):
+        container = dev.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            value = container.get(key)
+            if value is not None:
+                return value
+
+    for key in keys:
+        value = dev.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _brightness_to_ha(raw: Any) -> int | None:
+    """Convert DayBetter brightness formats to Home Assistant's 0-255 scale."""
+    value = _safe_float(raw)
+    if value is None:
+        return None
+    if value <= 0:
+        return 0
+    if value <= 1:
+        return max(1, min(255, round(value * 255)))
+    if value <= 100:
+        return max(1, min(255, round(value * 255 / 100)))
+    return max(0, min(255, round(value)))
+
+
+def _kelvin_to_mired(kelvin: float) -> int:
+    """Convert Kelvin to mired."""
+    return round(1000000 / kelvin)
+
+
+def _mired_to_kelvin(mired: float) -> int:
+    """Convert mired to Kelvin."""
+    return round(1000000 / mired)
+
+
+def _status_to_bool(raw: Any) -> bool | None:
+    """Convert common DayBetter status fields to a boolean."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().casefold()
+        if normalized in ("1", "on", "true", "yes"):
+            return True
+        if normalized in ("0", "off", "false", "no"):
+            return False
+        return None
+    value = _safe_float(raw)
+    if value is None:
+        return None
+    return value == 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -24,7 +103,12 @@ async def async_setup_entry(
     """Set up DayBetter lights from a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     api = data["api"]
-    devices = data["devices"]
+    try:
+        devices = await api.fetch_devices_with_statuses()
+        data["devices"] = devices
+    except Exception:  # pragma: no cover
+        _LOGGER.exception("Failed to fetch DayBetter light devices during setup")
+        devices = data["devices"]
 
     # Get light PIDs list
     pids_data = await api.fetch_pids()
@@ -42,6 +126,35 @@ async def async_setup_entry(
         if dev.get("deviceMoldPid") in light_pids and dev.get("deviceMoldPid") not in sensor_pids
     ]    
     async_add_entities(lights)
+    data["light_entities"] = lights
+
+    if data.get("light_poll_unsub") is None:
+
+        async def _poll(now: Any) -> None:
+            try:
+                new_devices = await api.fetch_devices_with_statuses()
+            except Exception:  # pragma: no cover
+                _LOGGER.exception("Failed to fetch DayBetter light devices")
+                return
+
+            data["devices"] = new_devices
+            for light in data.get("light_entities", []):
+                if light.update_from_devices(new_devices):
+                    light.async_write_ha_state()
+
+        data["light_poll_unsub"] = async_track_time_interval(hass, _poll, SCAN_INTERVAL)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload DayBetter lights."""
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}
+    unsub = data.get("light_poll_unsub")
+    if unsub is not None:
+        unsub()
+        data["light_poll_unsub"] = None
+    data["light_entities"] = []
+    return True
+
 
 class DayBetterLight(LightEntity):
     """Representation of a DayBetter light."""
@@ -56,6 +169,7 @@ class DayBetterLight(LightEntity):
         self._brightness = 255  # Default maximum brightness
         self._hs_color = (0.0, 0.0)  # The default is white (hue, saturation)
         self._color_temp = 300  # Default color temperature (mireds unit)
+        self._attr_should_poll = False
         
         device_features = device.get("deviceFeatures", [])
         
@@ -64,14 +178,15 @@ class DayBetterLight(LightEntity):
         # - 只要支持 HS，就只声明 HS（不再额外声明 BRIGHTNESS）
         # - 否则只声明 COLOR_TEMP
         # - 否则只声明 BRIGHTNESS
+        # Color-capable modes imply brightness support in Home Assistant.
         supported_modes: set[ColorMode] = set()
         if 3 in device_features:
-            supported_modes = {ColorMode.HS}
-        elif 4 in device_features:
-            supported_modes = {ColorMode.COLOR_TEMP}
-        elif 2 in device_features:
+            supported_modes.add(ColorMode.HS)
+        if 4 in device_features:
+            supported_modes.add(ColorMode.COLOR_TEMP)
+        if not supported_modes and 2 in device_features:
             supported_modes = {ColorMode.BRIGHTNESS}
-        else:
+        elif not supported_modes:
             supported_modes = {ColorMode.BRIGHTNESS}
             
         self._attr_supported_color_modes = supported_modes
@@ -88,8 +203,86 @@ class DayBetterLight(LightEntity):
         if ColorMode.COLOR_TEMP in supported_modes:
             self._min_mireds = 150
             self._max_mireds = 500
+            self._attr_min_color_temp_kelvin = _mired_to_kelvin(self._max_mireds)
+            self._attr_max_color_temp_kelvin = _mired_to_kelvin(self._min_mireds)
             
         self._device_features = device_features
+        self._apply_device_update(device)
+
+    def _matches_device(self, device: dict[str, Any]) -> bool:
+        """Return true if a cloud device row belongs to this entity."""
+        for key in ("deviceName", "deviceId", "deviceGroupName"):
+            current = self._device.get(key)
+            incoming = device.get(key)
+            if current is None or incoming is None:
+                continue
+            if str(current).strip() == str(incoming).strip():
+                return True
+        return False
+
+    def _apply_device_update(self, device: dict[str, Any]) -> bool:
+        """Apply state fields from a refreshed DayBetter device row."""
+        changed = False
+        self._device.update(device)
+
+        is_on = _status_to_bool(
+            _read_first_existing(
+                device,
+                ("deviceState", "on", "power", "switch", "state", "status"),
+            )
+        )
+        if is_on is not None and is_on != self._is_on:
+            self._is_on = is_on
+            changed = True
+
+        brightness = _brightness_to_ha(
+            _read_first_existing(
+                device,
+                ("brightness", "bright", "brightnessPercent", "brightness_percent"),
+            )
+        )
+        if brightness is not None and brightness != self._brightness:
+            self._brightness = brightness
+            changed = True
+
+        hue = _safe_float(_read_first_existing(device, ("hue", "h")))
+        saturation = _safe_float(_read_first_existing(device, ("saturation", "sat", "s")))
+        if hue is not None and saturation is not None:
+            if saturation <= 1:
+                saturation *= 100
+            hs_color = (hue % 360, max(0, min(100, saturation)))
+            if hs_color != self._hs_color:
+                self._hs_color = hs_color
+                changed = True
+            if ColorMode.HS in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.HS
+
+        kelvin = _safe_float(_read_first_existing(device, ("kelvin", "colorTempKelvin")))
+        if kelvin:
+            color_temp = _kelvin_to_mired(kelvin)
+            if color_temp != self._color_temp:
+                self._color_temp = color_temp
+                changed = True
+            if ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+        else:
+            color_temp = _safe_float(_read_first_existing(device, ("color_temp", "colorTemp", "mireds")))
+            if color_temp is not None and color_temp > 1000:
+                color_temp = _kelvin_to_mired(color_temp)
+            if color_temp is not None and round(color_temp) != self._color_temp:
+                self._color_temp = round(color_temp)
+                changed = True
+            if color_temp is not None and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+
+        return changed
+
+    def update_from_devices(self, devices: list[dict[str, Any]]) -> bool:
+        """Update this light from a refreshed list of cloud devices."""
+        for device in devices:
+            if self._matches_device(device):
+                return self._apply_device_update(device)
+        return False
 
     @property
     def is_on(self) -> bool:
@@ -124,6 +317,13 @@ class DayBetterLight(LightEntity):
         if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
             return self._color_temp
         return None
+
+    @property
+    def color_temp_kelvin(self) -> int | None:
+        """Return the color temperature in Kelvin."""
+        if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+            return _mired_to_kelvin(self._color_temp)
+        return None
     
     @property
     def min_mireds(self) -> int:
@@ -138,6 +338,20 @@ class DayBetterLight(LightEntity):
         if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
             return getattr(self, '_max_mireds', 500)
         return 500
+
+    @property
+    def min_color_temp_kelvin(self) -> int:
+        """Return the warmest supported color temperature in Kelvin."""
+        if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+            return _mired_to_kelvin(getattr(self, '_max_mireds', 500))
+        return _mired_to_kelvin(500)
+
+    @property
+    def max_color_temp_kelvin(self) -> int:
+        """Return the coldest supported color temperature in Kelvin."""
+        if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+            return _mired_to_kelvin(getattr(self, '_min_mireds', 153))
+        return _mired_to_kelvin(153)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on."""
@@ -158,22 +372,50 @@ class DayBetterLight(LightEntity):
         hs_color = kwargs.get(ATTR_HS_COLOR)
         if hs_color is not None and self._attr_supported_color_modes and ColorMode.HS in self._attr_supported_color_modes:
             self._hs_color = hs_color
+            self._attr_color_mode = ColorMode.HS
 
         # Handle color temperature
         # Home Assistant 2026.3.x may not expose ATTR_COLOR_TEMP constant anymore,
         # but the service/kwargs key is still "color_temp".
         color_temp = kwargs.get("color_temp")
+        color_temp_kelvin = kwargs.get("color_temp_kelvin")
+        if color_temp is None and color_temp_kelvin is not None:
+            color_temp = _kelvin_to_mired(color_temp_kelvin)
         if color_temp is not None and self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
             self._color_temp = color_temp
+            self._attr_color_mode = ColorMode.COLOR_TEMP
 
-        # Control equipment
-        result = await self._api.control_device(
-            self._device["deviceName"], 
-            True, 
-            brightness if has_brightness else None,
-            hs_color if self._attr_supported_color_modes and ColorMode.HS in self._attr_supported_color_modes else None,
-            color_temp if self._attr_supported_color_modes and ColorMode.COLOR_TEMP in self._attr_supported_color_modes else None
+        supports_hs = self._attr_supported_color_modes and ColorMode.HS in self._attr_supported_color_modes
+        supports_color_temp = (
+            self._attr_supported_color_modes
+            and ColorMode.COLOR_TEMP in self._attr_supported_color_modes
         )
+
+        effective_brightness = self._brightness if has_brightness else None
+        result = await self._api.control_device(
+            self._device["deviceName"],
+            True,
+            effective_brightness if hs_color is not None and supports_hs else brightness,
+            hs_color if supports_hs else None,
+            color_temp if supports_color_temp else None,
+        )
+
+        # DayBetter exposes color temperature and brightness as separate command
+        # types, so a HA call containing both needs a follow-up brightness command.
+        if (
+            result.get("code", 1)
+            and color_temp is not None
+            and brightness is not None
+            and has_brightness
+            and supports_color_temp
+        ):
+            result = await self._api.control_device(
+                self._device["deviceName"],
+                True,
+                brightness,
+                None,
+                None,
+            )
         
         # Update status based on control results
         if result.get("code", 1):

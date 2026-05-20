@@ -76,6 +76,32 @@ class DayBetterApi:
                 _LOGGER.error("Failed to fetch device statuses: %s", await resp.text())
                 return []
 
+    async def fetch_devices_with_statuses(self) -> list[dict[str, Any]]:
+        """Fetch devices and merge matching live status rows when available."""
+        devices = await self.fetch_devices()
+        statuses = await self.fetch_device_statuses()
+        if not devices or not statuses:
+            return devices
+
+        status_by_name: dict[str, dict[str, Any]] = {}
+        for status in statuses:
+            for key in ("deviceName", "deviceId", "deviceGroupName"):
+                value = status.get(key)
+                if value is None:
+                    continue
+                normalized = str(value).strip()
+                status_by_name[normalized] = status
+                status_by_name[normalized.casefold()] = status
+
+        merged: list[dict[str, Any]] = []
+        for device in devices:
+            merged_device = device.copy()
+            status = self._find_status_for_device(device, status_by_name)
+            if status:
+                merged_device.update(status)
+            merged.append(merged_device)
+        return merged
+
     @staticmethod
     def _normalize_status_payload(raw: Any) -> list[dict[str, Any]]:
         """兼容 hass/status 返回 list 或 单 dict 或 {id: {...}} 映射."""
@@ -89,6 +115,24 @@ class DayBetterApi:
                 return vals
             return [raw]
         return []
+
+    @staticmethod
+    def _find_status_for_device(
+        device: dict[str, Any],
+        status_by_name: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Find a status row matching a device by the common identifiers."""
+        for key in ("deviceName", "deviceId", "deviceGroupName"):
+            value = device.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized in status_by_name:
+                return status_by_name[normalized]
+            folded = normalized.casefold()
+            if folded in status_by_name:
+                return status_by_name[folded]
+        return None
 
     async def fetch_sensor_data(self) -> list[dict[str, Any]]:
         """Fetch and merge sensor devices with their latest status.
@@ -281,6 +325,13 @@ class DayBetterApi:
                 if str(group_name).strip().casefold() == str(st_name).strip().casefold():
                     return st
         return None
+
+    @staticmethod
+    def _ha_brightness_to_percent(brightness: int) -> int:
+        """Convert Home Assistant brightness (0-255) to DayBetter percent (0-100)."""
+        if brightness <= 0:
+            return 0
+        return max(1, min(100, round(brightness * 100 / 255)))
             
     async def control_device(
         self, 
@@ -318,7 +369,7 @@ class DayBetterApi:
             payload = {
                 "deviceName": device_name, 
                 "type": 2, 
-                "brightness": brightness
+                "brightness": self._ha_brightness_to_percent(brightness)
             }
         else:
             # Type 1 control switch is used by default
