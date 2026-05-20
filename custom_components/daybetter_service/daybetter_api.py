@@ -85,7 +85,17 @@ class DayBetterApi:
 
         status_by_name: dict[str, dict[str, Any]] = {}
         for status in statuses:
-            for key in ("deviceName", "deviceId", "deviceGroupName"):
+            for key in (
+                "deviceName",
+                "deviceId",
+                "deviceGroupName",
+                "id",
+                "devId",
+                "deviceNo",
+                "deviceSn",
+                "sn",
+                "mac",
+            ):
                 value = status.get(key)
                 if value is None:
                     continue
@@ -112,7 +122,13 @@ class DayBetterApi:
         if isinstance(raw, dict):
             vals = list(raw.values())
             if vals and all(isinstance(v, dict) for v in vals):
-                return vals
+                normalized = []
+                for key, value in raw.items():
+                    status = value.copy()
+                    status.setdefault("deviceName", key)
+                    status.setdefault("deviceId", key)
+                    normalized.append(status)
+                return normalized
             return [raw]
         return []
 
@@ -122,7 +138,17 @@ class DayBetterApi:
         status_by_name: dict[str, dict[str, Any]],
     ) -> dict[str, Any] | None:
         """Find a status row matching a device by the common identifiers."""
-        for key in ("deviceName", "deviceId", "deviceGroupName"):
+        for key in (
+            "deviceName",
+            "deviceId",
+            "deviceGroupName",
+            "id",
+            "devId",
+            "deviceNo",
+            "deviceSn",
+            "sn",
+            "mac",
+        ):
             value = device.get(key)
             if value is None:
                 continue

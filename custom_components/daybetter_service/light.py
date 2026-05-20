@@ -12,9 +12,9 @@ from homeassistant.components.light import (
     LightEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later
 
 from .const import DOMAIN
 
@@ -38,7 +38,17 @@ def _safe_float(value: Any) -> float | None:
 
 def _read_first_existing(dev: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     """Read a value from top-level or common nested status containers."""
-    for container_key in ("deviceData", "data", "status", "extend", "extra"):
+    for container_key in (
+        "deviceData",
+        "data",
+        "status",
+        "extend",
+        "extra",
+        "properties",
+        "property",
+        "dp",
+        "dps",
+    ):
         container = dev.get(container_key)
         if not isinstance(container, dict):
             continue
@@ -51,6 +61,13 @@ def _read_first_existing(dev: dict[str, Any], keys: tuple[str, ...]) -> Any | No
         value = dev.get(key)
         if value is not None:
             return value
+
+    for value in dev.values():
+        if not isinstance(value, dict):
+            continue
+        nested = _read_first_existing(value, keys)
+        if nested is not None:
+            return nested
     return None
 
 
@@ -94,7 +111,11 @@ def _status_to_bool(raw: Any) -> bool | None:
     value = _safe_float(raw)
     if value is None:
         return None
-    return value == 1
+    if value == 0:
+        return False
+    if value == 1:
+        return True
+    return None
 
 
 async def async_setup_entry(
@@ -128,33 +149,6 @@ async def async_setup_entry(
     async_add_entities(lights)
     data["light_entities"] = lights
 
-    if data.get("light_poll_unsub") is None:
-
-        async def _poll(now: Any) -> None:
-            try:
-                new_devices = await api.fetch_devices_with_statuses()
-            except Exception:  # pragma: no cover
-                _LOGGER.exception("Failed to fetch DayBetter light devices")
-                return
-
-            data["devices"] = new_devices
-            for light in data.get("light_entities", []):
-                if light.update_from_devices(new_devices):
-                    light.async_write_ha_state()
-
-        data["light_poll_unsub"] = async_track_time_interval(hass, _poll, SCAN_INTERVAL)
-
-
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload DayBetter lights."""
-    data = hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}
-    unsub = data.get("light_poll_unsub")
-    if unsub is not None:
-        unsub()
-        data["light_poll_unsub"] = None
-    data["light_entities"] = []
-    return True
-
 
 class DayBetterLight(LightEntity):
     """Representation of a DayBetter light."""
@@ -169,7 +163,8 @@ class DayBetterLight(LightEntity):
         self._brightness = 255  # Default maximum brightness
         self._hs_color = (0.0, 0.0)  # The default is white (hue, saturation)
         self._color_temp = 300  # Default color temperature (mireds unit)
-        self._attr_should_poll = False
+        self._verify_state_unsub = None
+        self._attr_should_poll = True
         
         device_features = device.get("deviceFeatures", [])
         
@@ -209,6 +204,34 @@ class DayBetterLight(LightEntity):
         self._device_features = device_features
         self._apply_device_update(device)
 
+    async def async_update(self) -> None:
+        """Fetch the latest light state from DayBetter."""
+        try:
+            devices = await self._api.fetch_devices_with_statuses()
+        except Exception:  # pragma: no cover
+            _LOGGER.exception("Failed to update DayBetter light %s", self._attr_unique_id)
+            return
+
+        if not self.update_from_devices(devices):
+            _LOGGER.debug(
+                "No refreshed DayBetter state matched light %s; device keys=%s",
+                self._attr_unique_id,
+                list(self._device.keys()),
+            )
+
+    def _schedule_verify_state(self) -> None:
+        """Refresh from DayBetter shortly after sending a command."""
+        if self._verify_state_unsub is not None:
+            self._verify_state_unsub()
+            self._verify_state_unsub = None
+
+        @callback
+        def _verify(now: Any) -> None:
+            self._verify_state_unsub = None
+            self.async_schedule_update_ha_state(True)
+
+        self._verify_state_unsub = async_call_later(self.hass, 1, _verify)
+
     def _matches_device(self, device: dict[str, Any]) -> bool:
         """Return true if a cloud device row belongs to this entity."""
         for key in ("deviceName", "deviceId", "deviceGroupName"):
@@ -228,20 +251,54 @@ class DayBetterLight(LightEntity):
         is_on = _status_to_bool(
             _read_first_existing(
                 device,
-                ("deviceState", "on", "power", "switch", "state", "status"),
+                (
+                    "on",
+                    "power",
+                    "switch",
+                    "switchStatus",
+                    "powerState",
+                    "lightSwitch",
+                    "state",
+                    "status",
+                    "deviceState",
+                ),
             )
         )
         if is_on is not None and is_on != self._is_on:
+            _LOGGER.debug(
+                "DayBetter light %s power changed from %s to %s",
+                self._attr_unique_id,
+                self._is_on,
+                is_on,
+            )
             self._is_on = is_on
             changed = True
 
         brightness = _brightness_to_ha(
             _read_first_existing(
                 device,
-                ("brightness", "bright", "brightnessPercent", "brightness_percent"),
+                (
+                    "brightness",
+                    "bright",
+                    "brightnessPercent",
+                    "brightness_percent",
+                    "brightnessValue",
+                    "brightValue",
+                    "bright_value",
+                    "bri",
+                    "dimming",
+                    "luminance",
+                    "lightness",
+                ),
             )
         )
         if brightness is not None and brightness != self._brightness:
+            _LOGGER.debug(
+                "DayBetter light %s brightness changed from %s to %s",
+                self._attr_unique_id,
+                self._brightness,
+                brightness,
+            )
             self._brightness = brightness
             changed = True
 
@@ -421,6 +478,7 @@ class DayBetterLight(LightEntity):
         if result.get("code", 1):
             self._is_on = True
             self.async_write_ha_state()
+            self._schedule_verify_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
@@ -437,3 +495,4 @@ class DayBetterLight(LightEntity):
         if result.get("code", 1):
             self._is_on = False
             self.async_write_ha_state()
+            self._schedule_verify_state()
