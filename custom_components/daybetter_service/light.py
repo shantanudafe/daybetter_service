@@ -234,7 +234,17 @@ class DayBetterLight(LightEntity):
 
     def _matches_device(self, device: dict[str, Any]) -> bool:
         """Return true if a cloud device row belongs to this entity."""
-        for key in ("deviceName", "deviceId", "deviceGroupName"):
+        for key in (
+            "deviceName",
+            "deviceId",
+            "deviceGroupName",
+            "id",
+            "devId",
+            "deviceNo",
+            "deviceSn",
+            "sn",
+            "mac",
+        ):
             current = self._device.get(key)
             incoming = device.get(key)
             if current is None or incoming is None:

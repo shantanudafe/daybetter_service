@@ -7,7 +7,12 @@ from homeassistant.core import HomeAssistant
 
 from .daybetter_api import DayBetterApi
 
-PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH, Platform.SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.LIGHT,
+    Platform.SWITCH,
+    Platform.SENSOR,
+    Platform.BUTTON,
+]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up DayBetter Services from a config entry."""

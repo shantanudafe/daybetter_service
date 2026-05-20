@@ -279,6 +279,7 @@ async def async_setup_entry(
             )
 
     async_add_entities(sensors)
+    runtime["sensor_entities"] = sensors
 
     # 统一轮询一次即可，传感器读取的是 hass.data 中最新 devices
     if runtime.get("sensor_poll_unsub") is None:
@@ -305,5 +306,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: Any) -> bool:
     if unsub is not None:
         unsub()
         runtime["sensor_poll_unsub"] = None
+    runtime["sensor_entities"] = []
     return True
 

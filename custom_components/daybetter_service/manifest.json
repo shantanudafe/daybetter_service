@@ -11,6 +11,7 @@
   "platforms": [
     "light",
     "switch",
-    "sensor"
+    "sensor",
+    "button"
   ]
 }
